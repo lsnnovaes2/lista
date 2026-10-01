@@ -32,7 +32,7 @@ class CiscoAPI
         $this->cacheDir     = $cacheDir;
 
         if (!is_dir($this->cacheDir)) {
-            mkdir($this->cacheDir, 0755, true);
+            mkdir($this->cacheDir, 0700, true);
         }
 
         $this->loadCachedToken();
@@ -62,8 +62,12 @@ class CiscoAPI
 
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlErr  = curl_error($ch);
         curl_close($ch);
 
+        if ($response === false) {
+            throw new \RuntimeException("Cisco OAuth: falha de conexão ({$curlErr})");
+        }
         if ($httpCode !== 200) {
             throw new \RuntimeException("Cisco OAuth falhou (HTTP {$httpCode}): {$response}");
         }
@@ -89,7 +93,7 @@ class CiscoAPI
 
     private function loadCachedToken(): void
     {
-        $file = $this->cacheDir . '/token.json';
+        $file = $this->tokenFile();
         if (file_exists($file)) {
             $data = json_decode(file_get_contents($file), true);
             if ($data && ($data['expiry'] ?? 0) > time()) {
@@ -101,17 +105,24 @@ class CiscoAPI
 
     private function saveCachedToken(): void
     {
-        file_put_contents($this->cacheDir . '/token.json', json_encode([
+        $file = $this->tokenFile();
+        file_put_contents($file, json_encode([
             'token'  => $this->accessToken,
             'expiry' => $this->tokenExpiry,
         ]));
+        @chmod($file, 0600); // o token dá acesso às APIs: só o dono lê
+    }
+
+    private function tokenFile(): string
+    {
+        return $this->cacheDir . '/token_' . substr(sha1($this->clientId), 0, 12) . '.json';
     }
 
     // =========================================================
     //  HTTP
     // =========================================================
 
-    private function apiGet(string $path, array $params = []): array
+    private function apiGet(string $path, array $params = [], bool $retried = false): array
     {
         $url = self::API_BASE . $path;
         if ($params) {
@@ -130,25 +141,47 @@ class CiscoAPI
 
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlErr  = curl_error($ch);
         curl_close($ch);
 
-        if ($httpCode === 401) {
-            // Token expirou, tenta re-auth uma vez
+        if ($response === false) {
+            throw new \RuntimeException("Cisco API: falha de conexão ({$curlErr})");
+        }
+
+        if ($httpCode === 401 && !$retried) {
+            // Token expirou/revogado: re-autentica e tenta uma única vez.
+            // Um segundo 401 (ex.: app sem acesso à API) cai no tratamento de erro abaixo.
             $this->accessToken = null;
-            return $this->apiGet($path, $params);
+            return $this->apiGet($path, $params, true);
         }
 
         $data = json_decode($response, true);
 
         if ($httpCode >= 400) {
+            $message = $data['message'] ?? $data['ErrorResponse']['APIError']['ErrorDescription'] ?? $response;
+            if ($httpCode === 401 || $httpCode === 403) {
+                $message = "Acesso negado (HTTP {$httpCode}). Verifique se a app no API Console "
+                         . "tem esta API habilitada e se a conta possui o entitlement (SNTC/PSS). {$message}";
+            }
             return [
                 'error'     => true,
                 'http_code' => $httpCode,
-                'message'   => $data['message'] ?? $response,
+                'message'   => is_string($message) ? $message : json_encode($message),
             ];
         }
 
         return $data ?? [];
+    }
+
+    /**
+     * Junta IDs (serial/PID) para o path da URL: "A,B,C", cada um url-encoded.
+     * PIDs como "ISR4331/K9" têm barra, que quebraria o path sem encoding.
+     */
+    private static function idList($ids): string
+    {
+        $ids = is_array($ids) ? $ids : explode(',', $ids);
+        $ids = array_filter(array_map('trim', $ids), 'strlen');
+        return implode(',', array_map('rawurlencode', $ids));
     }
 
     // =========================================================
@@ -163,9 +196,7 @@ class CiscoAPI
      */
     public function getWarrantyBySerialNumbers($serialNumbers): array
     {
-        if (is_array($serialNumbers)) {
-            $serialNumbers = implode(',', $serialNumbers);
-        }
+        $serialNumbers = self::idList($serialNumbers);
 
         $data = $this->apiGet("/sn2info/v2/coverage/summary/serial_numbers/{$serialNumbers}");
 
@@ -177,28 +208,49 @@ class CiscoAPI
         $results = [];
         $records = $data['serial_numbers'] ?? [];
 
+        // Formato da resposta (coverage/summary): cada registro traz warranty_* e
+        // coverage_* como campos simples; PIDs vêm em orderable_pid_list / base_pid_list.
         foreach ($records as $record) {
+            if (isset($record['ErrorResponse'])) {
+                // Serial inválido ou fora do entitlement da conta
+                $results[] = [
+                    'serial_number' => $record['sr_no'] ?? null,
+                    'erro'          => $record['ErrorResponse']['APIError']['ErrorDescription'] ?? 'Serial não encontrado',
+                ];
+                continue;
+            }
+
+            $orderable = $record['orderable_pid_list'][0] ?? [];
             $warranties = [];
-            foreach ($record['warranty_end_date'] ?? [] as $w) {
+            if (!empty($record['warranty_end_date'])) {
                 $warranties[] = [
-                    'tipo'       => $w['warranty_type'] ?? null,
-                    'descricao'  => $w['warranty_description'] ?? null,
-                    'data_fim'   => $w['warranty_end_date'] ?? null,
+                    'tipo'      => $record['warranty_type'] ?? null,
+                    'descricao' => $record['warranty_type_description'] ?? 'Garantia',
+                    'data_fim'  => $record['warranty_end_date'],
+                ];
+            }
+            if (!empty($record['covered_product_line_end_date'])) {
+                $warranties[] = [
+                    'tipo'      => 'contrato',
+                    'descricao' => 'Fim do contrato' . (!empty($record['service_contract_number'])
+                                    ? ' #' . $record['service_contract_number'] : ''),
+                    'data_fim'  => $record['covered_product_line_end_date'],
                 ];
             }
 
             $results[] = [
                 'serial_number'   => $record['sr_no'] ?? null,
                 'coberto'         => ($record['is_covered'] ?? '') === 'YES',
-                'status_cobertura'=> $record['coverage_status'] ?? null,
+                'cobertura_fim'   => $record['coverage_end_date'] ?? null,
+                'contrato_numero' => $record['service_contract_number'] ?? null,
                 'contrato'        => $record['contract_site_customer_name'] ?? null,
                 'produto' => [
-                    'pid'        => $record['orderable_pid'] ?? null,
-                    'descricao'  => $record['item_description'] ?? null,
-                    'tipo'       => $record['item_type'] ?? null,
+                    'pid'        => $orderable['orderable_pid'] ?? null,
+                    'base_pid'   => $record['base_pid_list'][0]['base_pid'] ?? null,
+                    'descricao'  => $orderable['item_description'] ?? null,
+                    'tipo'       => $orderable['item_type'] ?? null,
                 ],
                 'garantias'       => $warranties,
-                'data_envio'      => $record['shipped_date'] ?? null,
                 'service_line'    => $record['service_line_descr'] ?? null,
             ];
         }
@@ -211,9 +263,7 @@ class CiscoAPI
      */
     public function getCoverageStatus($serialNumbers): array
     {
-        if (is_array($serialNumbers)) {
-            $serialNumbers = implode(',', $serialNumbers);
-        }
+        $serialNumbers = self::idList($serialNumbers);
 
         return $this->apiGet("/sn2info/v2/coverage/status/serial_numbers/{$serialNumbers}");
     }
@@ -227,9 +277,7 @@ class CiscoAPI
      */
     public function getProductInfoBySerial($serialNumbers): array
     {
-        if (is_array($serialNumbers)) {
-            $serialNumbers = implode(',', $serialNumbers);
-        }
+        $serialNumbers = self::idList($serialNumbers);
 
         $data = $this->apiGet("/product/v1/information/serial_numbers/{$serialNumbers}");
 
@@ -239,6 +287,7 @@ class CiscoAPI
 
         $results = [];
         foreach ($data['product_list'] ?? [] as $product) {
+            if (isset($product['ErrorResponse'])) continue;
             $results[] = [
                 'serial_number'      => $product['sr_no'] ?? null,
                 'pid'                => $product['orderable_pid'] ?? null,
@@ -251,7 +300,9 @@ class CiscoAPI
                 'suporte_ativo'      => $product['product_support_page'] ?? null,
                 'visio_stencil'      => $product['visio_stencil_url'] ?? null,
                 'rich_media'         => $product['rich_media_urls'] ?? null,
-                'dimensoes'          => $product['dimensions'] ?? null,
+                'dimensoes'          => isset($product['dimensions_value'])
+                                        ? trim($product['dimensions_value'] . ' ' . ($product['dimensions_format'] ?? ''))
+                                        : null,
                 'peso'               => $product['weight'] ?? null,
                 'form_factor'        => $product['form_factor'] ?? null,
             ];
@@ -265,9 +316,7 @@ class CiscoAPI
      */
     public function getProductInfoByPID($productIds): array
     {
-        if (is_array($productIds)) {
-            $productIds = implode(',', $productIds);
-        }
+        $productIds = self::idList($productIds);
 
         return $this->apiGet("/product/v1/information/product_ids/{$productIds}");
     }
@@ -281,9 +330,7 @@ class CiscoAPI
      */
     public function getEoLByPID($productIds): array
     {
-        if (is_array($productIds)) {
-            $productIds = implode(',', $productIds);
-        }
+        $productIds = self::idList($productIds);
 
         $data = $this->apiGet("/supporttools/eox/rest/5/EOXByProductID/1/{$productIds}", [
             'responseencoding' => 'json',
@@ -295,6 +342,10 @@ class CiscoAPI
 
         $results = [];
         foreach ($data['EOXRecord'] ?? [] as $eox) {
+            // PID sem anúncio de EoL volta como registro com EOXError (não é falha)
+            if (!empty($eox['EOXError']) || empty($eox['EOLProductID'])) continue;
+
+            $mig = $eox['EOXMigrationDetails'] ?? [];
             $results[] = [
                 'pid'                     => $eox['EOLProductID'] ?? null,
                 'descricao'               => $eox['ProductIDDescription'] ?? null,
@@ -306,11 +357,19 @@ class CiscoAPI
                 'end_of_service_attach'   => $eox['EndOfServiceContractRenewal']['value'] ?? null,
                 'last_date_support'       => $eox['LastDateOfSupport']['value'] ?? null,
                 'end_of_svc_attach'       => $eox['EndOfSvcAttachDate']['value'] ?? null,
-                'migracao_pid'            => $eox['MigrationInformation']['MigrationProductId'] ?? null,
-                'migracao_nome'           => $eox['MigrationInformation']['MigrationProductName'] ?? null,
-                'migracao_url'            => $eox['MigrationInformation']['MigrationProductInfoURL'] ?? null,
+                'migracao_pid'            => ($mig['MigrationProductId'] ?? '') ?: null,
+                'migracao_nome'           => ($mig['MigrationProductName'] ?? '') ?: null,
+                'migracao_url'            => ($mig['MigrationProductInfoURL'] ?? '') ?: null,
             ];
         }
+
+        // A API devolve "" para datas ainda não anunciadas
+        foreach ($results as &$r) {
+            foreach ($r as $k => $v) {
+                if ($v === '') $r[$k] = null;
+            }
+        }
+        unset($r);
 
         return ['success' => true, 'eol' => $results];
     }
@@ -336,7 +395,9 @@ class CiscoAPI
         // 1. Product Info pelo Serial
         try {
             $prodInfo = $this->getProductInfoBySerial($serialNumber);
-            if (!empty($prodInfo['produtos'][0])) {
+            if (isset($prodInfo['error'])) {
+                $result['erros'][] = 'product_info: ' . $prodInfo['message'];
+            } elseif (!empty($prodInfo['produtos'][0])) {
                 $result['produto'] = $prodInfo['produtos'][0];
                 // Se não tínhamos o PID, pegamos daqui
                 if (!$partNumber && $result['produto']['pid']) {
@@ -351,8 +412,18 @@ class CiscoAPI
         // 2. Warranty
         try {
             $warranty = $this->getWarrantyBySerialNumbers($serialNumber);
-            if (!empty($warranty['resultados'][0])) {
-                $result['garantia'] = $warranty['resultados'][0];
+            $w = $warranty['resultados'][0] ?? null;
+            if (isset($warranty['error'])) {
+                $result['erros'][] = 'warranty: ' . $warranty['message'];
+            } elseif ($w && isset($w['erro'])) {
+                $result['erros'][] = 'warranty: ' . $w['erro'];
+            } elseif ($w) {
+                $result['garantia'] = $w;
+                // Sem Product Info (ex.: API não habilitada), usa o PID da garantia
+                if (!$partNumber && !empty($w['produto']['pid'])) {
+                    $partNumber = $w['produto']['pid'];
+                    $result['part_number'] = $partNumber;
+                }
             }
         } catch (\Exception $e) {
             $result['erros'][] = 'warranty: ' . $e->getMessage();
@@ -362,7 +433,9 @@ class CiscoAPI
         if ($partNumber) {
             try {
                 $eol = $this->getEoLByPID($partNumber);
-                if (!empty($eol['eol'][0])) {
+                if (isset($eol['error'])) {
+                    $result['erros'][] = 'eol: ' . $eol['message'];
+                } elseif (!empty($eol['eol'][0])) {
                     $result['eol'] = $eol['eol'][0];
                 }
             } catch (\Exception $e) {

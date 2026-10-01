@@ -14,35 +14,45 @@
 
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/CiscoAPI.php';
+require_once __DIR__ . '/CiscoBarcode.php';
 
 // --- Credenciais Cisco API ---
 // Registre sua app em https://apiconsole.cisco.com
 // Selecione: Client Credentials + Support APIs (SN2INFO, Product Info, EoX)
-$ciscoClientId     = CISCO_API_CLIENT_ID     ?? '';
-$ciscoClientSecret = CISCO_API_CLIENT_SECRET ?? '';
+$ciscoClientId     = CISCO_API_CLIENT_ID;
+$ciscoClientSecret = CISCO_API_CLIENT_SECRET;
 
 if (empty($ciscoClientId) || empty($ciscoClientSecret)) {
     jsonResponse([
         'error'   => true,
-        'message' => 'Credenciais da Cisco API não configuradas. Defina CISCO_API_CLIENT_ID e CISCO_API_CLIENT_SECRET no config.php.',
+        'code'    => 'not_configured',
+        'message' => 'Credenciais da Cisco API não configuradas. Defina CISCO_API_CLIENT_ID e CISCO_API_CLIENT_SECRET em api/config.local.php (ou como variáveis de ambiente).',
         'setup'   => [
             'passo_1' => 'Acesse https://apiconsole.cisco.com e faça login',
             'passo_2' => 'Registre uma nova aplicação',
             'passo_3' => 'Selecione "Client Credentials" como Grant Type',
             'passo_4' => 'Ative as APIs: Serial Number to Information, Product Information, End of Life',
-            'passo_5' => 'Copie Client ID e Client Secret para api/config.php',
+            'passo_5' => 'Copie api/config.local.example.php para api/config.local.php e preencha Client ID e Client Secret',
         ],
     ], 503);
 }
 
 // --- Validação ---
-$input = json_decode(file_get_contents('php://input'), true);
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    jsonResponse(['error' => true, 'message' => 'Método não permitido.'], 405);
+}
 
-$serial     = trim($input['serial']      ?? '');
-$partNumber = trim($input['part_number'] ?? '');
+$input = json_decode(file_get_contents('php://input'), true) ?: [];
 
-if (empty($serial) && empty($partNumber)) {
-    jsonResponse(['error' => 'Informe "serial" e/ou "part_number".'], 400);
+$serial     = strtoupper(trim((string) ($input['serial']      ?? '')));
+$partNumber = strtoupper(trim((string) ($input['part_number'] ?? '')));
+
+if ($serial === '' && $partNumber === '') {
+    jsonResponse(['error' => true, 'message' => 'Informe "serial" e/ou "part_number".'], 400);
+}
+// Até 75 serials/PIDs por chamada na API; aqui consultamos um por vez
+if (strpos($serial . $partNumber, ',') !== false) {
+    jsonResponse(['error' => true, 'message' => 'Consulte um serial/part number por vez.'], 400);
 }
 
 // --- Consulta ---
@@ -65,10 +75,13 @@ try {
 
         // Product Info pelo PID
         $prodInfo = $cisco->getProductInfoByPID($partNumber);
-        if (!empty($prodInfo['product_list'][0])) {
-            $p = $prodInfo['product_list'][0];
+        $p = $prodInfo['product_list'][0] ?? null;
+        if (isset($prodInfo['error'])) {
+            $result['erros'][] = 'product_info: ' . $prodInfo['message'];
+        } elseif ($p && !isset($p['ErrorResponse'])) {
             $result['produto'] = [
-                'pid'         => $p['orderable_pid'] ?? $partNumber,
+                'pid'         => $p['orderable_pid'] ?? $p['product_id'] ?? $partNumber,
+                'base_pid'    => $p['base_pid'] ?? null,
                 'descricao'   => $p['product_name'] ?? $p['item_description'] ?? null,
                 'categoria'   => $p['product_category'] ?? null,
                 'serie'       => $p['product_series'] ?? null,
@@ -77,31 +90,39 @@ try {
 
         // EoL
         $eol = $cisco->getEoLByPID($partNumber);
-        if (!empty($eol['eol'][0])) {
+        if (isset($eol['error'])) {
+            $result['erros'][] = 'eol: ' . $eol['message'];
+        } elseif (!empty($eol['eol'][0])) {
             $result['eol'] = $eol['eol'][0];
         }
     }
 
     // --- Atualiza catálogo local automaticamente ---
-    if (!empty($result['produto']['pid'])) {
+    // Falha no banco não pode esconder a resposta da Cisco, que já foi obtida.
+    $pidParaCatalogo = $result['produto']['pid'] ?? $result['garantia']['produto']['pid'] ?? null;
+    if ($pidParaCatalogo) try {
+        $produto = $result['produto'] ?? $result['garantia']['produto'];
         $db = getDB();
         $stmt = $db->prepare("SELECT id FROM equipamentos WHERE part_number = ?");
-        $stmt->execute([$result['produto']['pid']]);
+        $stmt->execute([$pidParaCatalogo]);
 
         if (!$stmt->fetch()) {
             // Auto-cadastra no catálogo local
-            $cat = detectCategory($result['produto']['pid']);
+            $cat = CiscoBarcode::detectCategory($pidParaCatalogo);
             $db->prepare("
                 INSERT IGNORE INTO equipamentos (part_number, base_pn, descricao, categoria, serie)
                 VALUES (?, ?, ?, ?, ?)
             ")->execute([
-                $result['produto']['pid'],
-                $result['produto']['base_pid'] ?? null,
-                $result['produto']['descricao'] ?? 'Importado da Cisco API',
+                $pidParaCatalogo,
+                $produto['base_pid'] ?? null,
+                $produto['descricao'] ?? 'Importado da Cisco API',
                 $cat,
-                $result['produto']['serie'] ?? null,
+                $produto['serie'] ?? null,
             ]);
+            $result['catalogo_atualizado'] = true;
         }
+    } catch (\PDOException $e) {
+        $result['erros'][] = 'catalogo: ' . $e->getMessage();
     }
 
     jsonResponse(['success' => true, 'cisco' => $result]);
@@ -111,25 +132,4 @@ try {
         'error'   => true,
         'message' => 'Erro ao consultar Cisco API: ' . $e->getMessage(),
     ], 500);
-}
-
-/**
- * Detecta categoria pelo padrão do part number
- */
-function detectCategory(string $pn): string
-{
-    $patterns = [
-        'firewall'     => '/^(FPR|ASA|FTD)\d/i',
-        'switch'       => '/^(C9[0-9]{3}|WS-C|N9K|N3K)/i',
-        'router'       => '/^(ISR|C8[0-9]{3}|ASR)/i',
-        'access_point' => '/^(C9[0-9]{3}AX|AIR-|CW9)/i',
-        'fan'          => '/(-FAN|FAN-)/i',
-        'fonte'        => '/(-PWR|-PSU|PWR-)/i',
-        'ssd'          => '/(-SSD|SSD-)/i',
-        'optico'       => '/^(GLC-|SFP-|QSFP)/i',
-    ];
-    foreach ($patterns as $cat => $regex) {
-        if (preg_match($regex, $pn)) return $cat;
-    }
-    return 'outro';
 }

@@ -20,6 +20,9 @@ if (!$input || empty($input['barcode'])) {
 
 $barcode  = trim($input['barcode']);
 $local    = $input['local']    ?? null;
+if (strlen($barcode) > 500) {
+    jsonResponse(['error' => 'Código muito longo.'], 400);
+}
 $operador = $input['operador'] ?? null;
 
 // --- Parse do barcode ---
@@ -58,7 +61,8 @@ if ($columns && $value) {
         // Prioriza match exato
         foreach ($results as $r) {
             if (strcasecmp($r['part_number'], $value) === 0 ||
-                strcasecmp($r['base_pn'], $value) === 0) {
+                strcasecmp($r['base_pn'] ?? '', $value) === 0 ||
+                strcasecmp($r['clei'] ?? '', $value) === 0) {
                 $equip = $r;
                 break;
             }
@@ -73,7 +77,8 @@ if ($equip && $equip['specs']) {
 }
 
 // --- Registra leitura ---
-$serialDetected = ($parser->getFieldType() === 'S') ? $value : null;
+// Num QR com vários campos o serial pode não ser o campo principal
+$serialDetected = $parser->getSerial();
 
 $stmt = $db->prepare("
     INSERT INTO leituras (equipamento_id, serial_number, barcode_raw, campo_tipo, local_leitura, lido_por)
@@ -95,6 +100,7 @@ $response = [
     'encontrado' => $equip !== null,
     'parse'      => $parsed,
     'leitura_id' => (int) $leituraId,
+    'serial'     => $serialDetected,
 ];
 
 if ($equip) {

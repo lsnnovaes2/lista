@@ -3,15 +3,28 @@
  * Cisco Equipment Scanner - Configuração
  */
 
-define('DB_HOST', 'localhost');
-define('DB_NAME', 'cisco_scanner');
-define('DB_USER', 'root');
-define('DB_PASS', '');
-define('DB_CHARSET', 'utf8mb4');
+// Sobrescritas locais (credenciais reais) ficam em config.local.php, fora do git.
+// Veja config.local.example.php. Variáveis de ambiente também são aceitas.
+if (file_exists(__DIR__ . '/config.local.php')) {
+    require __DIR__ . '/config.local.php';
+}
+
+/** Define a constante só se config.local.php não definiu; aceita variável de ambiente */
+function defineConfig(string $name, string $default = ''): void {
+    if (defined($name)) return;
+    $env = getenv($name);
+    define($name, $env !== false ? $env : $default);
+}
+
+defineConfig('DB_HOST', 'localhost');
+defineConfig('DB_NAME', 'cisco_scanner');
+defineConfig('DB_USER', 'root');
+defineConfig('DB_PASS', '');
+defined('DB_CHARSET') || define('DB_CHARSET', 'utf8mb4');
 
 // Cisco Support API - Registre em https://apiconsole.cisco.com
-define('CISCO_API_CLIENT_ID', '');       // Preencha com seu Client ID
-define('CISCO_API_CLIENT_SECRET', '');   // Preencha com seu Client Secret
+defineConfig('CISCO_API_CLIENT_ID');
+defineConfig('CISCO_API_CLIENT_SECRET');
 
 // Timezone
 date_default_timezone_set('America/Sao_Paulo');
@@ -32,7 +45,7 @@ set_exception_handler(function (Throwable $e) {
     jsonResponse(['error' => $msg], 500);
 });
 
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
     http_response_code(204);
     exit;
 }
