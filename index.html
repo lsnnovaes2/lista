@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Cisco Scanner</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+    <style>
+        :root {
+            --bg: #0a0f1a;
+            --surface: #111827;
+            --surface-2: #1a2332;
+            --border: #2a3444;
+            --text: #e8ecf2;
+            --text-dim: #8896a8;
+            --accent: #049fd9;     /* Cisco blue */
+            --accent-glow: rgba(4, 159, 217, 0.15);
+            --green: #34d399;
+            --amber: #fbbf24;
+            --red: #f87171;
+            --radius: 10px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100dvh;
+            padding-top: env(safe-area-inset-top, 0px);
+            padding-bottom: env(safe-area-inset-bottom, 0px);
+        }
+
+        /* --- Header --- */
+        .header {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 20px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            position: sticky;
+            top: env(safe-area-inset-top, 0px);
+            z-index: 10;
+        }
+        .header svg { flex-shrink: 0; }
+        .header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+        }
+        .header span {
+            font-size: 12px;
+            color: var(--text-dim);
+            margin-left: auto;
+        }
+
+        /* --- Tabs --- */
+        .tabs {
+            display: flex;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+        }
+        .tab {
+            flex: 1;
+            padding: 12px;
+            text-align: center;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-dim);
+            background: none;
+            border: none;
+            border-bottom: 2px solid transparent;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .tab.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
+        }
+
+        /* --- Content --- */
+        .content { padding: 16px; max-width: 600px; margin: 0 auto; }
+
+        .panel { display: none; }
+        .panel.active { display: block; }
+
+        /* --- Scanner --- */
+        #scanner-region {
+            width: 100%;
+            border-radius: var(--radius);
+            overflow: hidden;
+            background: #000;
+            aspect-ratio: 4/3;
+        }
+        #scanner-region video { width: 100%; border-radius: var(--radius); }
+
+        .scan-controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 14px;
+        }
+        .btn {
+            flex: 1;
+            padding: 12px 16px;
+            border-radius: var(--radius);
+            border: none;
+            font-family: inherit;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .btn-primary {
+            background: var(--accent);
+            color: #fff;
+        }
+        .btn-primary:active { transform: scale(0.97); }
+        .btn-primary:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .btn-outline {
+            background: transparent;
+            color: var(--accent);
+            border: 1px solid var(--border);
+        }
+
+        /* --- Manual input --- */
+        .manual-input {
+            margin-top: 14px;
+            display: flex;
+            gap: 8px;
+        }
+        .manual-input input {
+            flex: 1;
+            padding: 12px 14px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text);
+            font-family: inherit;
+            font-size: 14px;
+            outline: none;
+        }
+        .manual-input input:focus { border-color: var(--accent); }
+        .manual-input input::placeholder { color: var(--text-dim); }
+
+        /* --- Result Card --- */
+        .result-card {
+            margin-top: 20px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            animation: slideUp 0.3s ease;
+        }
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .result-header {
+            padding: 16px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+        .result-badge {
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+        .badge-found { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+        .badge-notfound { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+        .badge-cat {
+            background: var(--accent-glow);
+            color: var(--accent);
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-weight: 500;
+        }
+
+        .result-body { padding: 16px; }
+        .result-title {
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 4px;
+        }
+        .result-desc {
+            font-size: 13px;
+            color: var(--text-dim);
+            margin-bottom: 16px;
+        }
+
+        .specs-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        .spec-item {
+            background: var(--surface-2);
+            padding: 10px 12px;
+            border-radius: 8px;
+        }
+        .spec-label {
+            font-size: 11px;
+            color: var(--text-dim);
+            margin-bottom: 2px;
+        }
+        .spec-value {
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .parse-info {
+            margin-top: 14px;
+            padding: 12px;
+            background: var(--surface-2);
+            border-radius: 8px;
+            font-size: 12px;
+            color: var(--text-dim);
+        }
+        .parse-info code {
+            color: var(--amber);
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 12px;
+        }
+
+        /* --- History --- */
+        .history-item {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px;
+            margin-bottom: 10px;
+        }
+        .history-item .hi-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .history-item .hi-pn {
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .history-item .hi-time {
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+        .history-item .hi-desc {
+            font-size: 13px;
+            color: var(--text-dim);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 48px 20px;
+            color: var(--text-dim);
+        }
+        .empty-state svg { margin-bottom: 12px; opacity: 0.4; }
+
+        /* --- Toast --- */
+        .toast {
+            position: fixed;
+            bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+            left: 50%;
+            transform: translateX(-50%) translateY(80px);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            padding: 12px 20px;
+            border-radius: var(--radius);
+            font-size: 13px;
+            z-index: 100;
+            opacity: 0;
+            transition: all 0.3s ease;
+        }
+        .toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        /* --- Loading --- */
+        .spinner {
+            display: inline-block;
+            width: 18px; height: 18px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* html5-qrcode overrides */
+        #scanner-region img[alt="Info icon"] { display: none !important; }
+        #scanner-region div { border: none !important; }
+    </style>
+</head>
+<body>
+
+<header class="header">
+    <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+        <rect width="28" height="28" rx="6" fill="#049fd9"/>
+        <path d="M7 10h2v8H7zM11 8h2v12h-2zM15 10h2v8h-2zM19 8h2v12h-2z" fill="#fff"/>
+    </svg>
+    <h1>Cisco Scanner</h1>
+    <span>v1.0</span>
+</header>
+
+<nav class="tabs">
+    <button class="tab active" data-panel="scanner">Scanner</button>
+    <button class="tab" data-panel="historico">Histórico</button>
+    <button class="tab" data-panel="catalogo">Catálogo</button>
+</nav>
+
+<main class="content">
+
+    <!-- SCANNER -->
+    <section id="panel-scanner" class="panel active">
+        <div id="scanner-region"></div>
+
+        <div class="scan-controls">
+            <button id="btn-scan" class="btn btn-primary" onclick="toggleScanner()">
+                Iniciar Câmera
+            </button>
+            <button class="btn btn-outline" onclick="switchCamera()">Trocar Câmera</button>
+        </div>
+
+        <div class="manual-input">
+            <input type="text" id="manual-barcode" placeholder="Digitar código manualmente..."
+                   onkeydown="if(event.key==='Enter') lookupManual()">
+            <button class="btn btn-primary" style="flex:0 0 auto; padding:12px 20px" onclick="lookupManual()">
+                Buscar
+            </button>
+        </div>
+
+        <div id="result-area"></div>
+    </section>
+
+    <!-- HISTÓRICO -->
+    <section id="panel-historico" class="panel">
+        <div style="margin-bottom:14px">
+            <input type="text" id="hist-search" placeholder="Buscar no histórico..."
+                   style="width:100%;padding:12px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:inherit;font-size:14px;outline:none"
+                   oninput="loadHistory()">
+        </div>
+        <div id="history-list">
+            <div class="empty-state">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                <p>Nenhuma leitura ainda</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- CATÁLOGO -->
+    <section id="panel-catalogo" class="panel">
+        <div style="margin-bottom:14px">
+            <input type="text" id="cat-search" placeholder="Buscar equipamento..."
+                   style="width:100%;padding:12px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:inherit;font-size:14px;outline:none"
+                   oninput="loadCatalog()">
+        </div>
+        <div id="catalog-list">
+            <div class="empty-state">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                <p>Carregando catálogo...</p>
+            </div>
+        </div>
+    </section>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<script>
+// ========================
+//  CONFIG
+// ========================
+const API_BASE = './api';  // Ajuste se necessário
+
+// ========================
+//  TABS
+// ========================
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById('panel-' + tab.dataset.panel).classList.add('active');
+
+        if (tab.dataset.panel === 'historico') loadHistory();
+        if (tab.dataset.panel === 'catalogo') loadCatalog();
+    });
+});
+
+// ========================
+//  SCANNER
+// ========================
+let scanner = null;
+let scanning = false;
+let cameraFacing = 'environment';
+
+function toggleScanner() {
+    if (scanning) {
+        stopScanner();
+    } else {
+        startScanner();
+    }
+}
+
+function startScanner() {
+    const btn = document.getElementById('btn-scan');
+    btn.textContent = 'Parar Câmera';
+    scanning = true;
+
+    scanner = new Html5Qrcode('scanner-region');
+    scanner.start(
+        { facingMode: cameraFacing },
+        {
+            fps: 10,
+            qrbox: { width: 280, height: 100 },
+            formatsToSupport: [
+                Html5QrcodeSupportedFormats.CODE_128,
+                Html5QrcodeSupportedFormats.CODE_39,
+                Html5QrcodeSupportedFormats.EAN_13,
+                Html5QrcodeSupportedFormats.QR_CODE,
+            ],
+        },
+        onScanSuccess,
+        () => {} // ignore errors
+    ).catch(err => {
+        toast('Erro ao acessar câmera: ' + err);
+        stopScanner();
+    });
+}
+
+function stopScanner() {
+    const btn = document.getElementById('btn-scan');
+    btn.textContent = 'Iniciar Câmera';
+    scanning = false;
+    if (scanner) {
+        scanner.stop().catch(() => {});
+        scanner.clear();
+    }
+}
+
+function switchCamera() {
+    cameraFacing = cameraFacing === 'environment' ? 'user' : 'environment';
+    if (scanning) {
+        stopScanner();
+        setTimeout(startScanner, 300);
+    }
+    toast('Câmera: ' + (cameraFacing === 'environment' ? 'Traseira' : 'Frontal'));
+}
+
+let lastScan = '';
+let lastScanTime = 0;
+
+function onScanSuccess(decoded) {
+    // Debounce: ignora leitura duplicada em 3s
+    const now = Date.now();
+    if (decoded === lastScan && (now - lastScanTime) < 3000) return;
+    lastScan = decoded;
+    lastScanTime = now;
+
+    // Vibra se disponível
+    if (navigator.vibrate) navigator.vibrate(100);
+
+    toast('Código lido: ' + decoded);
+    doLookup(decoded);
+}
+
+// ========================
+//  LOOKUP
+// ========================
+function lookupManual() {
+    const input = document.getElementById('manual-barcode');
+    const val = input.value.trim();
+    if (!val) return;
+    doLookup(val);
+    input.value = '';
+}
+
+async function doLookup(barcode) {
+    const area = document.getElementById('result-area');
+    area.innerHTML = '<div style="text-align:center;padding:24px"><div class="spinner"></div></div>';
+
+    try {
+        const resp = await fetch(API_BASE + '/scan.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                barcode,
+                local: null,
+                operador: null,
+            }),
+        });
+        const data = await resp.json();
+        renderResult(data);
+    } catch (err) {
+        area.innerHTML = renderNotFound(barcode, err.message);
+    }
+}
+
+function renderResult(data) {
+    const area = document.getElementById('result-area');
+
+    if (data.encontrado && data.equipamento) {
+        const eq = data.equipamento;
+        const p  = data.parse;
+
+        let specsHtml = '';
+        if (eq.specs && typeof eq.specs === 'object') {
+            specsHtml = '<div class="specs-grid">';
+            for (const [k, v] of Object.entries(eq.specs)) {
+                const label = k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                specsHtml += `
+                    <div class="spec-item">
+                        <div class="spec-label">${label}</div>
+                        <div class="spec-value">${v}</div>
+                    </div>`;
+            }
+            specsHtml += '</div>';
+        }
+
+        area.innerHTML = `
+        <div class="result-card">
+            <div class="result-header">
+                <span class="result-badge badge-found">Encontrado</span>
+                <span class="badge-cat">${eq.categoria}</span>
+                ${eq.serie ? '<span class="badge-cat">' + eq.serie + '</span>' : ''}
+            </div>
+            <div class="result-body">
+                <div class="result-title">${eq.part_number}</div>
+                <div class="result-desc">${eq.descricao}</div>
+                ${specsHtml}
+                <div class="parse-info">
+                    Campo lido: <code>(${p.field_type || '?'}) ${p.field_name}</code>
+                    &nbsp;→&nbsp; Valor: <code>${p.value}</code>
+                </div>
+                <button class="btn btn-primary" style="margin-top:14px;width:100%"
+                    onclick="ciscoLookup('${p.value}', '${eq.part_number}')">
+                    Consultar Garantia na Cisco
+                </button>
+                <div id="cisco-result"></div>
+            </div>
+        </div>`;
+    } else {
+        const p = data.parse;
+        area.innerHTML = `
+        <div class="result-card">
+            <div class="result-header">
+                <span class="result-badge badge-notfound">Não encontrado</span>
+                ${p.category ? '<span class="badge-cat">' + p.category + '</span>' : ''}
+            </div>
+            <div class="result-body">
+                <div class="result-title">${p.value || p.raw}</div>
+                <div class="result-desc">${data.sugestao?.mensagem || 'Equipamento não cadastrado.'}</div>
+                <div class="parse-info">
+                    Campo: <code>(${p.field_type || '?'}) ${p.field_name}</code><br>
+                    Valor bruto: <code>${p.raw}</code>
+                </div>
+            </div>
+        </div>`;
+    }
+}
+
+function renderNotFound(barcode, error) {
+    return `
+    <div class="result-card">
+        <div class="result-header">
+            <span class="result-badge badge-notfound">Erro</span>
+        </div>
+        <div class="result-body">
+            <div class="result-title">${barcode}</div>
+            <div class="result-desc">Não foi possível consultar a API. Verifique se o backend está rodando.</div>
+            <div class="parse-info">Erro: <code>${error}</code></div>
+        </div>
+    </div>`;
+}
+
+// ========================
+//  CISCO API LOOKUP
+// ========================
+async function ciscoLookup(scannedValue, partNumber) {
+    const area = document.getElementById('cisco-result');
+    area.innerHTML = '<div style="text-align:center;padding:16px"><div class="spinner"></div> Consultando Cisco...</div>';
+
+    // Determina se o valor escaneado é serial ou part number
+    const isSerial = /^[A-Z]{3}\d{4}[A-Z0-9]{4}$/i.test(scannedValue);
+
+    const body = {};
+    if (isSerial) {
+        body.serial = scannedValue;
+        if (partNumber) body.part_number = partNumber;
+    } else {
+        body.part_number = partNumber || scannedValue;
+    }
+
+    try {
+        const resp = await fetch(API_BASE + '/cisco-lookup.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+
+        if (data.error) {
+            area.innerHTML = renderCiscoError(data);
+            return;
+        }
+
+        area.innerHTML = renderCiscoResult(data.cisco);
+    } catch (err) {
+        area.innerHTML = `<div class="parse-info" style="margin-top:12px;color:var(--red)">Erro: ${err.message}</div>`;
+    }
+}
+
+function renderCiscoResult(c) {
+    let html = '<div style="margin-top:14px">';
+
+    // Garantia
+    if (c.garantia) {
+        const g = c.garantia;
+        const coberto = g.coberto;
+        const badgeClass = coberto ? 'badge-found' : 'badge-notfound';
+        const statusText = coberto ? 'Coberto' : 'Sem cobertura';
+
+        html += `
+        <div style="background:var(--surface-2);border-radius:8px;padding:14px;margin-bottom:10px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                <span style="font-weight:600;font-size:14px">Garantia Cisco</span>
+                <span class="result-badge ${badgeClass}">${statusText}</span>
+            </div>
+            <div class="specs-grid">`;
+
+        if (g.produto?.pid) {
+            html += `<div class="spec-item"><div class="spec-label">PID</div><div class="spec-value">${g.produto.pid}</div></div>`;
+        }
+        if (g.produto?.descricao) {
+            html += `<div class="spec-item"><div class="spec-label">Descrição</div><div class="spec-value">${g.produto.descricao}</div></div>`;
+        }
+        if (g.data_envio) {
+            html += `<div class="spec-item"><div class="spec-label">Data Envio</div><div class="spec-value">${g.data_envio}</div></div>`;
+        }
+        if (g.service_line) {
+            html += `<div class="spec-item"><div class="spec-label">Service Line</div><div class="spec-value">${g.service_line}</div></div>`;
+        }
+        if (g.contrato) {
+            html += `<div class="spec-item"><div class="spec-label">Cliente</div><div class="spec-value">${g.contrato}</div></div>`;
+        }
+
+        // Datas de garantia
+        if (g.garantias && g.garantias.length > 0) {
+            g.garantias.forEach(w => {
+                html += `<div class="spec-item">
+                    <div class="spec-label">${w.descricao || w.tipo || 'Garantia'}</div>
+                    <div class="spec-value">${w.data_fim || 'N/A'}</div>
+                </div>`;
+            });
+        }
+
+        html += '</div></div>';
+    }
+
+    // End-of-Life
+    if (c.eol) {
+        const e = c.eol;
+        html += `
+        <div style="background:var(--surface-2);border-radius:8px;padding:14px;margin-bottom:10px">
+            <div style="font-weight:600;font-size:14px;margin-bottom:10px">End-of-Life</div>
+            <div class="specs-grid">`;
+
+        const eolFields = [
+            ['End of Sale', e.end_of_sale],
+            ['End of SW Maintenance', e.end_of_sw_maintenance],
+            ['End of Security Vuln', e.end_of_security_vuln],
+            ['Last Date of Support', e.last_date_support],
+        ];
+
+        eolFields.forEach(([label, val]) => {
+            if (val) {
+                const isPast = new Date(val) < new Date();
+                html += `<div class="spec-item">
+                    <div class="spec-label">${label}</div>
+                    <div class="spec-value" style="color:${isPast ? 'var(--red)' : 'var(--green)'}">${val}</div>
+                </div>`;
+            }
+        });
+
+        if (e.migracao_pid) {
+            html += `<div class="spec-item" style="grid-column:span 2">
+                <div class="spec-label">Migração sugerida</div>
+                <div class="spec-value">${e.migracao_pid} — ${e.migracao_nome || ''}</div>
+            </div>`;
+        }
+
+        html += '</div></div>';
+    }
+
+    // Produto extra
+    if (c.produto && !c.garantia) {
+        html += `
+        <div style="background:var(--surface-2);border-radius:8px;padding:14px">
+            <div style="font-weight:600">${c.produto.pid || c.part_number}</div>
+            <div style="color:var(--text-dim);font-size:13px">${c.produto.descricao || ''}</div>
+        </div>`;
+    }
+
+    if (c.erros && c.erros.length > 0) {
+        html += `<div class="parse-info" style="margin-top:8px">Avisos: ${c.erros.join('; ')}</div>`;
+    }
+
+    html += '</div>';
+    return html;
+}
+
+function renderCiscoError(data) {
+    let html = `<div style="background:var(--surface-2);border-radius:8px;padding:14px;margin-top:14px">
+        <div style="color:var(--amber);font-weight:600;margin-bottom:8px">Cisco API não configurada</div>
+        <div style="font-size:13px;color:var(--text-dim)">${data.message}</div>`;
+
+    if (data.setup) {
+        html += '<ol style="margin-top:10px;padding-left:18px;font-size:13px;color:var(--text-dim)">';
+        Object.values(data.setup).forEach(step => {
+            html += `<li style="margin-bottom:4px">${step}</li>`;
+        });
+        html += '</ol>';
+    }
+
+    html += '</div>';
+    return html;
+}
+
+// ========================
+//  HISTORY
+// ========================
+async function loadHistory() {
+    const list = document.getElementById('history-list');
+    const q = document.getElementById('hist-search')?.value || '';
+
+    try {
+        const resp = await fetch(API_BASE + '/historico.php?limit=30&q=' + encodeURIComponent(q));
+        const data = await resp.json();
+
+        if (!data.leituras || data.leituras.length === 0) {
+            list.innerHTML = '<div class="empty-state"><p>Nenhuma leitura encontrada</p></div>';
+            return;
+        }
+
+        list.innerHTML = data.leituras.map(l => `
+            <div class="history-item">
+                <div class="hi-top">
+                    <span class="hi-pn">${l.part_number || l.barcode_raw}</span>
+                    <span class="hi-time">${formatDate(l.created_at)}</span>
+                </div>
+                <div class="hi-desc">
+                    ${l.descricao || 'Não identificado'} ${l.serial_number ? '· S/N: ' + l.serial_number : ''}
+                </div>
+            </div>
+        `).join('');
+    } catch {
+        list.innerHTML = '<div class="empty-state"><p>Erro ao carregar histórico</p></div>';
+    }
+}
+
+// ========================
+//  CATALOG
+// ========================
+async function loadCatalog() {
+    const list = document.getElementById('catalog-list');
+    const q = document.getElementById('cat-search')?.value || '';
+
+    try {
+        const resp = await fetch(API_BASE + '/catalogo.php?q=' + encodeURIComponent(q));
+        const data = await resp.json();
+
+        if (!data.equipamentos || data.equipamentos.length === 0) {
+            list.innerHTML = '<div class="empty-state"><p>Nenhum equipamento encontrado</p></div>';
+            return;
+        }
+
+        list.innerHTML = data.equipamentos.map(eq => `
+            <div class="history-item">
+                <div class="hi-top">
+                    <span class="hi-pn">${eq.part_number}</span>
+                    <span class="badge-cat">${eq.categoria}</span>
+                </div>
+                <div class="hi-desc">${eq.descricao}</div>
+            </div>
+        `).join('');
+    } catch {
+        list.innerHTML = '<div class="empty-state"><p>Erro ao carregar catálogo</p></div>';
+    }
+}
+
+// ========================
+//  HELPERS
+// ========================
+function formatDate(str) {
+    if (!str) return '';
+    const d = new Date(str);
+    return d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+}
+
+function toast(msg) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    setTimeout(() => el.classList.remove('show'), 2500);
+}
+</script>
+</body>
+</html>
